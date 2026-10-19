@@ -1,4 +1,4 @@
-# Bruciatore_BLE Controller
+# VEVOR Diesel Heater BLE Controller (Bruciatore_BLE)
 
 This project provides a Python script for interacting with the VEVOR diesel air heater, All-in-One model, via Bluetooth Low Energy (BLE). The code has been developed through Bluetooth data sniffing between the heater and the manufacturer's "AirHeaterBLE" app.
 

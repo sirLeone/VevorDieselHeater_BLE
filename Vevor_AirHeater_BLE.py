@@ -111,7 +111,7 @@ class HeaterStatus:
         )
 
     def __str__(self) -> str:
-        # Ottieni la descrizione testuale o un valore di default se non è valido
+        # Get the text description, or a default value when unknown
         running_state_description = self.running_state_description
 
         return (
@@ -160,7 +160,7 @@ class VEVORHeater:
             
             self.last_update = current_time
             
-            # Ottieni la descrizione del running state
+            # Get the running state description
             running_state_description = status.running_state_description
             
             os.system('cls' if os.name == 'nt' else 'clear')

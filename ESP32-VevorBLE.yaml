@@ -197,11 +197,11 @@ interval:
 text_sensor:
   - platform: template
     name: "Glow Plug Status"
-    id: stato_Candeletta
+    id: running_step_text
     icon: "mdi:induction"
   - platform: template
     name: "Heater Mode"
-    id: Mode_Burner
+    id: heater_mode_text
   - platform: template
     name: "Error"
     id: error_text
@@ -220,7 +220,7 @@ text_sensor:
 binary_sensor:
   - platform: template
     name: "Heater Status"
-    id: stato_Bruciatore
+    id: heater_running
   - platform: template
     name: "Heater Connected"
     id: heater_connected
@@ -244,7 +244,7 @@ sensor:
 
   - platform: template
     name: "Error Code"
-    id: Error_Code
+    id: error_code
     accuracy_decimals: 0
     icon: "mdi:alert-circle-outline"
 
@@ -281,7 +281,7 @@ sensor:
 
   - platform: template
     name: "Power Status"
-    id: stato_Potenza
+    id: heater_set_point
     accuracy_decimals: 0
     icon: "mdi:speedometer"
 
@@ -311,7 +311,7 @@ sensor:
 
   - platform: ble_client
     type: characteristic
-    id: my_ble_sensor
+    id: heater_status_frame
     ble_client_id: heater_ble
     service_uuid: "0000ffe0-0000-1000-8000-00805f9b34fb"
     characteristic_uuid: "0000ffe1-0000-1000-8000-00805f9b34fb"
@@ -364,18 +364,18 @@ sensor:
       }
 
       id(protocol_variant).publish_state(aa66 ? "AA 66" : "AA 55");
-      id(stato_Bruciatore).publish_state(running_state > 0);
-      id(Mode_Burner).publish_state(mode == 2 ? "Automatic" : "Level");
+      id(heater_running).publish_state(running_state > 0);
+      id(heater_mode_text).publish_state(mode == 2 ? "Automatic" : "Level");
       id(running_step).publish_state(step);
       if (running_state == 0 && step == 0) {
-        id(stato_Candeletta).publish_state("Standby");
+        id(running_step_text).publish_state("Standby");
       } else if (step < sizeof(steps) / sizeof(steps[0])) {
-        id(stato_Candeletta).publish_state(steps[step]);
+        id(running_step_text).publish_state(steps[step]);
       } else {
         ESP_LOGD("heater", "Unknown running step: %d", step);
       }
 
-      id(Error_Code).publish_state(aa66 ? error : display_error);
+      id(error_code).publish_state(aa66 ? error : display_error);
       id(controller_error_code).publish_state(controller_error);
       const char *const *errors = aa66 ? errors_aa66 : errors_aa55;
       id(error_text).publish_state(error <= 10 ? errors[error] : "Unknown error");
@@ -384,7 +384,7 @@ sensor:
       id(battery_voltage).publish_state((x[11] | (x[12] << 8)) / 10.0f);
       id(heating_temperature).publish_state((int16_t) (x[13] | (x[14] << 8)));
       id(room_temperature).publish_state((int16_t) (x[15] | (x[16] << 8)));
-      id(stato_Potenza).publish_state(x[9]);
+      id(heater_set_point).publish_state(x[9]);
       if (running_state == 0 && step == 0) {
         id(fan_speed).publish_state(0);
       } else if (actual_level >= 0) {
