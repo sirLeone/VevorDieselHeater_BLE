@@ -102,6 +102,16 @@ globals:
     type: int
     initial_value: "0"
 
+  # Timer: Unix time when timed heating ends (0 = not active). Restored after a reboot.
+  - id: timer_off_at
+    type: uint32_t
+    restore_value: true
+    initial_value: "0"
+  # millis() when timed heating was started
+  - id: timer_started_ms
+    type: uint32_t
+    initial_value: "0"
+
 script:
   # Builds and sends one command frame:
   # [0xAA, 0x55, passkey/100, passkey%100, cmd, value low, value high, checksum]
@@ -188,6 +198,39 @@ script:
           cmd: 4
           value: !lambda "return std::max(8, std::min(36, temperature));"
 
+  # Turns the heater on for "Timer Duration" minutes
+  - id: start_timed_heating
+    mode: restart
+    then:
+      - if:
+          condition:
+            lambda: "return id(ha_time).now().is_valid();"
+          then:
+            - lambda: |-
+                const uint32_t minutes = (uint32_t) id(timer_duration).state;
+                id(timer_off_at) = id(ha_time).now().timestamp + minutes * 60;
+                id(timer_started_ms) = millis();
+                ESP_LOGI("timer", "Timed heating for %u min", (unsigned) minutes);
+            - script.execute:
+                id: send_command
+                cmd: 3
+                value: 1
+            - script.execute: update_timer_remaining
+          else:
+            - logger.log:
+                level: WARN
+                format: "Time not synchronized with Home Assistant, timed heating not started"
+
+  - id: update_timer_remaining
+    then:
+      - lambda: |-
+          auto now = id(ha_time).now();
+          float remaining = 0;
+          if (id(timer_off_at) != 0 && now.is_valid() && (uint32_t) now.timestamp < id(timer_off_at)) {
+            remaining = ceilf((id(timer_off_at) - (uint32_t) now.timestamp) / 60.0f);
+          }
+          id(timer_remaining).publish_state(remaining);
+
 interval:
   - interval: ${poll_interval}
     then:
@@ -195,6 +238,18 @@ interval:
           id: send_command
           cmd: 1
           value: 0
+  # End of timed heating
+  - interval: 30s
+    then:
+      - if:
+          condition:
+            lambda: |-
+              auto now = id(ha_time).now();
+              return id(timer_off_at) != 0 && now.is_valid() && (uint32_t) now.timestamp >= id(timer_off_at);
+          then:
+            - logger.log: "Timed heating finished, turning the heater off"
+            - switch.turn_off: heater_power
+      - script.execute: update_timer_remaining
   # Mark the heater offline when no status frame arrived for 30s
   - interval: 10s
     then:
@@ -322,6 +377,13 @@ sensor:
     state_class: measurement
     icon: "mdi:radiator"
 
+  - platform: template
+    name: "Timer Remaining"
+    id: timer_remaining
+    unit_of_measurement: "min"
+    accuracy_decimals: 0
+    icon: "mdi:timer-sand"
+
   - platform: ble_client
     type: characteristic
     id: heater_status_frame
@@ -440,6 +502,12 @@ sensor:
           id(heater_temperature).publish_state(set_temp);
         }
       }
+      // Timed heating ends when the heater is turned off on the panel or in the app
+      if (id(timer_off_at) != 0 && running_state == 0 && millis() - id(timer_started_ms) > 60000) {
+        ESP_LOGI("timer", "Heater turned off, timed heating cancelled");
+        id(timer_off_at) = 0;
+        id(update_timer_remaining).execute();
+      }
       if (id(heater_power).state != (running_state > 0)) {
         id(heater_power).publish_state(running_state > 0);
       }
@@ -457,10 +525,19 @@ switch:
           cmd: 3
           value: 1
     turn_off_action:
+      - lambda: "id(timer_off_at) = 0;"
       - script.execute:
           id: send_command
           cmd: 3
           value: 0
+      - script.execute: update_timer_remaining
+
+  - platform: template
+    name: "Timer Enabled"
+    id: timer_enabled
+    icon: "mdi:timer-cog-outline"
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
 
 # Select for mode
 select:
@@ -476,7 +553,33 @@ select:
           id: ensure_mode
           target_mode: !lambda 'return x == "Automatic" ? 2 : 1;'
 
+  - platform: template
+    name: "Timer Days"
+    id: timer_days
+    icon: "mdi:calendar-week"
+    options:
+      - "Every day"
+      - "Weekdays"
+      - "Weekend"
+      - "Once"
+    initial_option: "Every day"
+    optimistic: true
+    restore_value: true
+
 number:
+  - platform: template
+    name: "Timer Duration"
+    id: timer_duration
+    min_value: 10
+    max_value: 720
+    step: 10
+    initial_value: 60
+    unit_of_measurement: "min"
+    icon: "mdi:timer-outline"
+    mode: box
+    optimistic: true
+    restore_value: true
+
   - platform: template
     name: "Heater Temperature"
     id: heater_temperature
@@ -545,6 +648,50 @@ button:
           cmd: 1
           value: 0
 
+  - platform: template
+    name: "Timed Heating Start"
+    icon: "mdi:timer-play-outline"
+    on_press:
+      - script.execute: start_timed_heating
+
+  - platform: template
+    name: "Timed Heating Stop"
+    icon: "mdi:timer-stop-outline"
+    on_press:
+      - switch.turn_off: heater_power
+
   - platform: restart
     name: "Restart ESP"
     entity_category: diagnostic
+
+# Time from Home Assistant (time zone of Home Assistant), used by the timer
+time:
+  - platform: homeassistant
+    id: ha_time
+
+datetime:
+  - platform: template
+    name: "Timer Start Time"
+    id: timer_start_time
+    type: time
+    optimistic: true
+    restore_value: true
+    initial_value: "06:00:00"
+    time_id: ha_time
+    on_time:
+      - if:
+          condition:
+            lambda: |-
+              if (!id(timer_enabled).state) return false;
+              // day_of_week: 1 = Sunday ... 7 = Saturday
+              const int day = id(ha_time).now().day_of_week;
+              const bool weekend = day == 1 || day == 7;
+              const auto days = id(timer_days).active_index().value_or(0);
+              return days == 0 || days == 3 || (days == 1 && !weekend) || (days == 2 && weekend);
+          then:
+            - script.execute: start_timed_heating
+            - if:
+                condition:
+                  lambda: "return id(timer_days).active_index().value_or(0) == 3;"
+                then:
+                  - switch.turn_off: timer_enabled

@@ -72,12 +72,36 @@ Entities:
 |---------------|----------|
 | Controls      | Heater Power, Heater Mode (Level / Automatic), Heater LEVEL (1-10), Heater Temperature (8-36°C) |
 | Buttons       | Level Up / Down, Temperature Up / Down, Refresh Status, Restart ESP |
+| Timer         | Timer Enabled, Timer Start Time, Timer Days (Every day / Weekdays / Weekend / Once), Timer Duration, Timer Remaining, Timed Heating Start / Stop |
 | Sensors       | Room Temperature, Heating Temperature, Battery Voltage, Altitude, Power Status (set level / temperature), Fan Speed (current level), Error Code (panel E-xx), Error (text), Display Error (panel E-xx text), Glow Plug Status (running step), Heater Status, Heater Mode |
 | Diagnostics   | Heater Connected, Heater BLE RSSI, WiFi Signal, Controller Error Code, Running Step, Protocol, Last Frame, Uptime |
 
 The controls follow the heater state, also when it is changed on the heater panel or in the app.
 While the heater reports an error, mode, level and temperature changes are blocked (as in the app);
 the error codes are described in [PROTOCOL.md](PROTOCOL.md#error-codes).
+
+### Timer
+
+`AA 55` / `AA 66` heaters have no built-in timer, so the timer runs on the ESP32 and uses the time (and time
+zone) of Home Assistant. At "Timer Start Time" on the selected days the heater is turned on with its current
+mode and level/temperature, and turned off after "Timer Duration" minutes. "Once" disables the timer after it
+has run. "Timed Heating Start" heats for "Timer Duration" minutes right away. Turning the heater off (switch,
+button, panel or app) ends timed heating. The end time is kept across ESP32 reboots.
+
+Example Home Assistant card (entity ids depend on your `friendly_name`):
+
+```yaml
+type: entities
+title: Heater timer
+entities:
+  - entity: switch.diesel_air_heater_timer_enabled
+  - entity: datetime.diesel_air_heater_timer_start_time
+  - entity: select.diesel_air_heater_timer_days
+  - entity: number.diesel_air_heater_timer_duration
+  - entity: sensor.diesel_air_heater_timer_remaining
+  - entity: button.diesel_air_heater_timed_heating_start
+  - entity: button.diesel_air_heater_timed_heating_stop
+```
 The `send_command` Home Assistant action sends any command from [PROTOCOL.md](PROTOCOL.md), e.g.
 `esphome.<device_name>_send_command` with `cmd: 3`, `value: 1`.
 
