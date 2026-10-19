@@ -97,6 +97,10 @@ globals:
   - id: current_set_temp
     type: int
     initial_value: "20"
+  # Active error code (0 = no fault). Like the app, mode/level/temperature changes are blocked on error.
+  - id: current_error
+    type: int
+    initial_value: "0"
 
 script:
   # Builds and sends one command frame:
@@ -111,7 +115,12 @@ script:
     then:
       - if:
           condition:
-            lambda: "return id(ble_connected);"
+            lambda: |-
+              if ((cmd == 2 || cmd == 4) && id(current_error) != 0) {
+                ESP_LOGW("heater", "Heater error %d active, command %d (value %d) blocked", id(current_error), cmd, value);
+                return false;
+              }
+              return id(ble_connected);
           then:
             - ble_client.ble_write:
                 id: heater_ble
@@ -132,7 +141,7 @@ script:
           else:
             - logger.log:
                 level: WARN
-                format: "Heater not connected, command %d (value %d) dropped"
+                format: "Command %d (value %d) not sent"
                 args: ["cmd", "value"]
 
   # Switch the operating mode only when needed (1 = LEVEL, 2 = AUTOMATIC)
@@ -205,6 +214,10 @@ text_sensor:
   - platform: template
     name: "Error"
     id: error_text
+    icon: "mdi:alert-circle-outline"
+  - platform: template
+    name: "Display Error"
+    id: display_error_text
     icon: "mdi:alert-circle-outline"
   - platform: template
     name: "Protocol"
@@ -323,14 +336,25 @@ sensor:
       //  0-1 header | 2 command | 3 running state | 4 error | 5 running step | 6-7 altitude
       //  8 mode | 9 set level/temp | 10 actual level-1 | 11-12 voltage*10 | 13-14 heat exchanger temp
       //  15-16 room temp | 17 display error code (AA 55) / error (AA 66) | 18 reserved | 19 checksum
-      static const char *const steps[] = {"Warmup", "Self test running", "Ignition", "Heating", "Shutting down"};
-      static const char *const errors_aa55[] = {
-          "No fault", "Startup failure", "Lack of fuel", "Supply voltage overrun", "Outlet sensor fault",
-          "Inlet sensor fault", "Pulse pump fault", "Fan fault", "Ignition unit fault", "Overheating",
-          "Overheat sensor fault"};
-      static const char *const errors_aa66[] = {
-          "No fault", "Supply voltage overrun", "Unknown", "Ignition unit fault", "Pulse pump fault",
-          "Overheating", "Fan fault", "Unknown", "Lack of fuel", "Overheat sensor fault", "Startup failure"};
+      static const char *const steps[] = {"Warmup", "Self test running", "Ignition", "Heating", "Shutting down", "Standby"};
+      // Controller error codes (byte 4 of AA 55 frames), translated from the Chinese texts of the app
+      static const char *const controller_errors[] = {
+          "No fault", "Startup failure", "Flame-out, lack of fuel", "Supply voltage abnormal",
+          "Air outlet sensor fault", "Air inlet sensor fault", "Fuel pump fault", "Fan fault", "Glow plug fault",
+          "Overheat protection", "Heat exchanger temperature sensor fault"};
+      // Panel error codes E-01..E-10 (byte 17: display error of AA 55, error of AA 66).
+      // 2 and 7 are not named in the app, they are taken from the heater manuals.
+      static const char *const panel_errors[] = {
+          "No fault", "Supply voltage abnormal", "Overvoltage", "Glow plug fault", "Fuel pump fault",
+          "Overheat protection", "Fan fault", "Communication fault", "Flame-out, lack of fuel",
+          "Overheat sensor fault", "Repeated startup failure"};
+      auto describe = [](const char *const *table, uint8_t code) -> std::string {
+        char text[64];
+        if (code == 0) return table[0];
+        if (code > 10) snprintf(text, sizeof(text), "E-%02d Unknown error", code);
+        else snprintf(text, sizeof(text), "E-%02d %s", code, table[code]);
+        return text;
+      };
 
       if (x.size() < 17 || x[0] != 0xAA || (x[1] != 0x55 && x[1] != 0x66)) {
         ESP_LOGW("heater", "Unsupported frame (%u bytes): %s", (unsigned) x.size(), format_hex_pretty(x).c_str());
@@ -375,10 +399,14 @@ sensor:
         ESP_LOGD("heater", "Unknown running step: %d", step);
       }
 
-      id(error_code).publish_state(aa66 ? error : display_error);
+      id(current_error) = error;
+      if (error != 0) {
+        ESP_LOGW("heater", "Heater error %d (controller %d, display %d)", error, controller_error, display_error);
+      }
+      id(error_code).publish_state(display_error);
       id(controller_error_code).publish_state(controller_error);
-      const char *const *errors = aa66 ? errors_aa66 : errors_aa55;
-      id(error_text).publish_state(error <= 10 ? errors[error] : "Unknown error");
+      id(error_text).publish_state(aa66 ? describe(panel_errors, error) : describe(controller_errors, error));
+      id(display_error_text).publish_state(describe(panel_errors, display_error));
 
       id(altitude).publish_state(x[6] | (x[7] << 8));
       id(battery_voltage).publish_state((x[11] | (x[12] << 8)) / 10.0f);

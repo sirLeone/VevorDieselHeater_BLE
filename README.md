@@ -72,10 +72,12 @@ Entities:
 |---------------|----------|
 | Controls      | Heater Power, Heater Mode (Level / Automatic), Heater LEVEL (1-10), Heater Temperature (8-36°C) |
 | Buttons       | Level Up / Down, Temperature Up / Down, Refresh Status, Restart ESP |
-| Sensors       | Room Temperature, Heating Temperature, Battery Voltage, Altitude, Power Status (set level / temperature), Fan Speed (current level), Error Code, Error (text), Glow Plug Status (running step), Heater Status, Heater Mode |
+| Sensors       | Room Temperature, Heating Temperature, Battery Voltage, Altitude, Power Status (set level / temperature), Fan Speed (current level), Error Code (panel E-xx), Error (text), Display Error (panel E-xx text), Glow Plug Status (running step), Heater Status, Heater Mode |
 | Diagnostics   | Heater Connected, Heater BLE RSSI, WiFi Signal, Controller Error Code, Running Step, Protocol, Last Frame, Uptime |
 
 The controls follow the heater state, also when it is changed on the heater panel or in the app.
+While the heater reports an error, mode, level and temperature changes are blocked (as in the app);
+the error codes are described in [PROTOCOL.md](PROTOCOL.md#error-codes).
 The `send_command` Home Assistant action sends any command from [PROTOCOL.md](PROTOCOL.md), e.g.
 `esphome.<device_name>_send_command` with `cmd: 3`, `value: 1`.
 

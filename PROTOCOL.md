@@ -81,16 +81,26 @@ heaters do not report these settings back.
 
 ### Error codes
 
-| Code | `AA 55` (byte 4)       | `AA 66` (byte 17)      |
-|------|------------------------|------------------------|
-| 0    | No fault               | No fault               |
-| 1    | Startup failure        | Supply voltage overrun |
-| 2    | Lack of fuel           | –                      |
-| 3    | Supply voltage overrun | Ignition unit fault    |
-| 4    | Outlet sensor fault    | Pulse pump fault       |
-| 5    | Inlet sensor fault     | Overheating            |
-| 6    | Pulse pump fault       | Fan fault              |
-| 7    | Fan fault              | –                      |
-| 8    | Ignition unit fault    | Lack of fuel           |
-| 9    | Overheating            | Overheat sensor fault  |
-| 10   | Overheat sensor fault  | Startup failure        |
+There are two numbering schemes. The app shows byte 4 with the *controller* table for `AA 55` heaters and
+byte 17 with the *panel* table for `AA 66` heaters. On `AA 55` heaters byte 17 holds the code shown on the
+heater panel (E-xx), which follows the panel table.
+
+The English texts in the app are poor translations, so the descriptions below are taken from the Chinese
+texts of the app. Panel codes 2 and 7 are not named in the app; they come from the heater manuals.
+
+| Code | Controller table (`AA 55`, byte 4)                  | Panel table (`AA 55` byte 17, `AA 66` byte 17)  |
+|------|-----------------------------------------------------|-------------------------------------------------|
+| 0    | No fault (无故障)                                   | No fault (无故障)                               |
+| 1    | Startup failure (启动失败)                          | Supply voltage abnormal (电压异常)              |
+| 2    | Flame-out, lack of fuel (缺油熄火)                  | Overvoltage (manuals)                           |
+| 3    | Supply voltage abnormal (电压异常)                  | Glow plug fault (点火塞异常)                    |
+| 4    | Air outlet sensor fault (出风传感异常)              | Fuel pump fault (油泵异常)                      |
+| 5    | Air inlet sensor fault (进风传感异常)               | Overheat protection (过热保护)                  |
+| 6    | Fuel pump fault (油泵异常)                          | Fan fault (风机异常)                            |
+| 7    | Fan fault (风机异常)                                | Communication fault (manuals)                   |
+| 8    | Glow plug fault (点火塞异常)                        | Flame-out, lack of fuel (缺油熄火)              |
+| 9    | Overheat protection (高温保护)                      | Overheat sensor fault (过热保护传感器)          |
+| 10   | Heat exchanger temperature sensor fault (炉温传感器异常) | Repeated startup failure (二次启动失败)     |
+
+While an error is active the app does not allow mode, level or temperature changes (power on/off is
+still allowed). The ESPHome configuration and the Python script do the same.

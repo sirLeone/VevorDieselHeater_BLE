@@ -35,21 +35,29 @@ RUNNING_STEPS = {
     0x02: "Ignition",
     0x03: "Heating",
     0x04: "Shutting down",
+    0x05: "Standby",
 }
 
-# Error texts from the AirHeaterBLE app ("AA 55" heaters, error in byte 4)
-ERRORS_AA55 = (
-    "No fault", "Startup failure", "Lack of fuel", "Supply voltage overrun",
-    "Outlet sensor fault", "Inlet sensor fault", "Pulse pump fault", "Fan fault",
-    "Ignition unit fault", "Overheating", "Overheat sensor fault",
+# Controller error codes (byte 4 of "AA 55" frames), translated from the Chinese texts of the app
+CONTROLLER_ERRORS = (
+    "No fault", "Startup failure", "Flame-out, lack of fuel", "Supply voltage abnormal",
+    "Air outlet sensor fault", "Air inlet sensor fault", "Fuel pump fault", "Fan fault",
+    "Glow plug fault", "Overheat protection", "Heat exchanger temperature sensor fault",
 )
 
-# Error texts from the AirHeaterBLE app ("AA 66" heaters, error in byte 17)
-ERRORS_AA66 = (
-    "No fault", "Supply voltage overrun", "Unknown", "Ignition unit fault",
-    "Pulse pump fault", "Overheating", "Fan fault", "Unknown", "Lack of fuel",
-    "Overheat sensor fault", "Startup failure",
+# Panel error codes E-01..E-10 (byte 17: display error of "AA 55", error of "AA 66").
+# 2 and 7 are not named in the app, they are taken from the heater manuals.
+PANEL_ERRORS = (
+    "No fault", "Supply voltage abnormal", "Overvoltage", "Glow plug fault", "Fuel pump fault",
+    "Overheat protection", "Fan fault", "Communication fault", "Flame-out, lack of fuel",
+    "Overheat sensor fault", "Repeated startup failure",
 )
+
+def describe_error(table: tuple, code: int) -> str:
+    """Error text with the panel style code, e.g. E-08 Flame-out, lack of fuel"""
+    if code == 0:
+        return table[0]
+    return f"E-{code:02d} {table[code] if code < len(table) else 'Unknown error'}"
 
 def to_int16(value: int) -> int:
     """Convert an unsigned 16-bit value to signed"""
@@ -79,8 +87,12 @@ class HeaterStatus:
 
     @property
     def error_description(self) -> str:
-        errors = ERRORS_AA66 if self.protocol == "AA 66" else ERRORS_AA55
-        return errors[self.error_code] if self.error_code < len(errors) else "Unknown error"
+        table = PANEL_ERRORS if self.protocol == "AA 66" else CONTROLLER_ERRORS
+        return describe_error(table, self.error_code)
+
+    @property
+    def display_error_description(self) -> str:
+        return describe_error(PANEL_ERRORS, self.display_error_code)
 
     @staticmethod
     def from_frame(data: bytes) -> Optional["HeaterStatus"]:
@@ -124,7 +136,8 @@ class HeaterStatus:
             f"Altitude: {self.altitude}m\n"
             f"Running state: {running_state_description}\n"
             f"Current level: {self.level}\n"
-            f"Status Code: {self.error_code} ({self.error_description})"
+            f"Status Code: {self.error_code} ({self.error_description})\n"
+            f"Display Error: {self.display_error_description}"
         )
 
 class VEVORHeater:
@@ -186,7 +199,9 @@ class VEVORHeater:
             status_table.add_row("Battery", f"[magenta]{status.voltage_battery:.1f}V[/magenta]")
             status_table.add_row("Altitude", f"[white]{status.altitude}m[/white]")
             error_color = "green" if status.error_code == 0 else "red"
-            status_table.add_row("Error", f"[{error_color}]{status.error_code} - {status.error_description}[/{error_color}]")
+            status_table.add_row("Error", f"[{error_color}]{status.error_description}[/{error_color}]")
+            display_color = "green" if status.display_error_code == 0 else "red"
+            status_table.add_row("Display Error", f"[{display_color}]{status.display_error_description}[/{display_color}]")
             status_table.add_row("Protocol", f"[white]{status.protocol}[/white]")
             
             commands = """
@@ -280,7 +295,13 @@ Enter command: """
     def request_status(self):
         self.send_command(self.create_command(HeaterCommand.STATUS, 0))
 
+    def check_no_error(self):
+        """Like the app, block mode/level/temperature changes while the heater reports an error"""
+        if self.status and self.status.error_code != 0:
+            raise RuntimeError(f"Heater error active: {self.status.error_description}")
+
     def set_mode(self, mode: HeaterMode):
+        self.check_no_error()
         cmd = self.create_command(HeaterCommand.MODE, mode)
         self.send_command(cmd)
 
@@ -292,6 +313,7 @@ Enter command: """
     def set_level(self, level: int):
         if not 1 <= level <= 10:
             raise ValueError("Level must be between 1 and 10")
+        self.check_no_error()
         if not self.status or self.status.mode != HeaterMode.LEVEL:
             self.set_mode(HeaterMode.LEVEL)
         cmd = self.create_command(HeaterCommand.LEVEL_OR_TEMP, level)
@@ -300,6 +322,7 @@ Enter command: """
     def set_temperature(self, temp: int):
         if not 8 <= temp <= 36:
             raise ValueError("Temperature must be between 8°C and 36°C")
+        self.check_no_error()
         if not self.status or self.status.mode != HeaterMode.AUTOMATIC:
             self.set_mode(HeaterMode.AUTOMATIC)
         cmd = self.create_command(HeaterCommand.LEVEL_OR_TEMP, temp)
@@ -362,8 +385,11 @@ def main():
                 except Exception as e:
                     console.print(f"[red]Error setting power: {e}[/red]")
             elif cmd in ["m1", "m2"]:
-                heater.set_mode(HeaterMode.LEVEL if cmd == "m1" else HeaterMode.AUTOMATIC)
-                console.print(f"[green]Mode {'LEVEL' if cmd == 'm1' else 'AUTOMATIC'}[/green]")
+                try:
+                    heater.set_mode(HeaterMode.LEVEL if cmd == "m1" else HeaterMode.AUTOMATIC)
+                    console.print(f"[green]Mode {'LEVEL' if cmd == 'm1' else 'AUTOMATIC'}[/green]")
+                except RuntimeError as e:
+                    console.print(f"[red]{e}[/red]")
             elif cmd in ["+", "-"]:
                 try:
                     heater.step(1 if cmd == "+" else -1)
@@ -388,6 +414,8 @@ def main():
                         console.print("[red]Temperature must be between 8°C and 36°C[/red]")
                 except ValueError:
                     console.print("[red]Invalid temperature format[/red]")
+                except RuntimeError as e:
+                    console.print(f"[red]{e}[/red]")
             elif cmd.startswith("l"):
                 try:
                     level = int(cmd[1:])
@@ -398,6 +426,8 @@ def main():
                         console.print("[red]Level must be between 1 and 10[/red]")
                 except ValueError:
                     console.print("[red]Invalid level format[/red]")
+                except RuntimeError as e:
+                    console.print(f"[red]{e}[/red]")
             else:
                 console.print("[red]Invalid command[/red]")
 
