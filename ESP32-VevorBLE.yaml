@@ -1,3 +1,13 @@
+substitutions:
+  name: bt-vevor_ble
+  friendly_name: Diesel_Air_Heater
+  # MAC address of the heater's BLE module
+  heater_mac: "21:47:08:1a:b1:1e"
+  # Heater password (AirHeaterBLE app -> Settings -> Password). Factory default: 1234
+  heater_passkey: "1234"
+  # How often the heater status is requested
+  poll_interval: 5s
+
 esphome:
   name: ${name}
   name_add_mac_suffix: false
@@ -6,16 +16,12 @@ esphome:
 #    board_build.f_cpu: 120000000L
 #    board_build.f_cpu: 240000000L
 
-substitutions:
-  name: bt-vevor_ble
-  friendly_name: Diesel_Air_Heater
-
-esp32_ble_tracker:
-
 esp32:
   board: esp32dev
   framework:
     type: arduino
+
+esp32_ble_tracker:
 
 # Enable logging
 logger:
@@ -23,11 +29,23 @@ logger:
 # Enable Home Assistant API
 api:
   encryption:
-    key: "vHF/emJMoAZz3q8k4JySuSZnYEa43IujpwN9+fQkwYk="
+    key: !secret api_encryption_key
+  actions:
+    # Send any command frame to the heater, e.g. cmd: 3, value: 1 (power ON).
+    # See PROTOCOL.md for the full list of commands.
+    - action: send_command
+      variables:
+        cmd: int
+        value: int
+      then:
+        - script.execute:
+            id: send_command
+            cmd: !lambda "return cmd;"
+            value: !lambda "return value;"
 
 ota:
   platform: esphome
-  password: "09ec3c09b5847b5a4eeef2c15ce8fb00"
+  password: !secret ota_password
 
 # Web Server
 # if you use home assistant and have frequent disconnections. disable the web_server
@@ -44,24 +62,137 @@ wifi:
     ssid: "VevorBLE Hotspot"
     password: "12345678"
 
-interval:
-  - interval: 15s
-    id: intervallo
-    then:
-      - ble_client.ble_write:
-          service_uuid: 0000ffe0-0000-1000-8000-00805f9b34fb
-          characteristic_uuid: 0000ffe1-0000-1000-8000-00805f9b34fb
-          value: [0xaa, 0x55, 0x0c, 0x22, 0x01, 0x00, 0x00, 0x2f]
-
 ble_client:
-  - mac_address: 21:47:08:1a:b1:1e # change to your mac address
+  - mac_address: ${heater_mac}
     id: heater_ble
+    on_connect:
+      then:
+        - lambda: "id(ble_connected) = true;"
+        - script.execute:
+            id: send_command
+            cmd: 1
+            value: 0
+    on_disconnect:
+      then:
+        - lambda: |-
+            id(ble_connected) = false;
+            id(heater_connected).publish_state(false);
 
 # Global variables
 globals:
+  - id: ble_connected
+    type: bool
+    initial_value: "false"
+  # millis() of the last valid status frame
+  - id: last_frame_ms
+    type: uint32_t
+    initial_value: "0"
+  # Last values reported by the heater
   - id: current_mode
     type: int
-    initial_value: '1'  # 1 for LEVEL, 2 for AUTOMATIC
+    initial_value: "1"  # 0 = unknown, 1 = LEVEL, 2 = AUTOMATIC (temperature)
+  - id: current_set_level
+    type: int
+    initial_value: "1"
+  - id: current_set_temp
+    type: int
+    initial_value: "20"
+
+script:
+  # Builds and sends one command frame:
+  # [0xAA, 0x55, passkey/100, passkey%100, cmd, value low, value high, checksum]
+  # Commands are queued and spaced so the heater can process each one.
+  - id: send_command
+    mode: queued
+    max_runs: 10
+    parameters:
+      cmd: int
+      value: int
+    then:
+      - if:
+          condition:
+            lambda: "return id(ble_connected);"
+          then:
+            - ble_client.ble_write:
+                id: heater_ble
+                service_uuid: 0000ffe0-0000-1000-8000-00805f9b34fb
+                characteristic_uuid: 0000ffe1-0000-1000-8000-00805f9b34fb
+                value: !lambda |-
+                  const uint16_t passkey = ${heater_passkey};
+                  std::vector<uint8_t> frame = {
+                    0xAA, 0x55,
+                    (uint8_t) (passkey / 100), (uint8_t) (passkey % 100),
+                    (uint8_t) cmd,
+                    (uint8_t) (value & 0xFF), (uint8_t) ((value >> 8) & 0xFF),
+                    0x00};
+                  frame[7] = (uint8_t) (frame[2] + frame[3] + frame[4] + frame[5] + frame[6]);
+                  ESP_LOGD("heater", "Sending: %s", format_hex_pretty(frame).c_str());
+                  return frame;
+            - delay: 500ms
+          else:
+            - logger.log:
+                level: WARN
+                format: "Heater not connected, command %d (value %d) dropped"
+                args: ["cmd", "value"]
+
+  # Switch the operating mode only when needed (1 = LEVEL, 2 = AUTOMATIC)
+  - id: ensure_mode
+    mode: queued
+    parameters:
+      target_mode: int
+    then:
+      - if:
+          condition:
+            lambda: "return id(current_mode) != target_mode;"
+          then:
+            - lambda: "id(current_mode) = target_mode;"
+            - script.execute:
+                id: send_command
+                cmd: 2
+                value: !lambda "return target_mode;"
+
+  - id: set_level
+    mode: queued
+    parameters:
+      level: int
+    then:
+      - script.execute:
+          id: ensure_mode
+          target_mode: 1
+      - lambda: "id(current_set_level) = level;"
+      - script.execute:
+          id: send_command
+          cmd: 4
+          value: !lambda "return std::max(1, std::min(10, level));"
+
+  - id: set_temperature
+    mode: queued
+    parameters:
+      temperature: int
+    then:
+      - script.execute:
+          id: ensure_mode
+          target_mode: 2
+      - lambda: "id(current_set_temp) = temperature;"
+      - script.execute:
+          id: send_command
+          cmd: 4
+          value: !lambda "return std::max(8, std::min(36, temperature));"
+
+interval:
+  - interval: ${poll_interval}
+    then:
+      - script.execute:
+          id: send_command
+          cmd: 1
+          value: 0
+  # Mark the heater offline when no status frame arrived for 30s
+  - interval: 10s
+    then:
+      - lambda: |-
+          bool online = id(ble_connected) && id(last_frame_ms) != 0 &&
+                        (millis() - id(last_frame_ms)) < 30000;
+          id(heater_connected).publish_state(online);
 
 text_sensor:
   - platform: template
@@ -71,21 +202,65 @@ text_sensor:
   - platform: template
     name: "Heater Mode"
     id: Mode_Burner
+  - platform: template
+    name: "Error"
+    id: error_text
+    icon: "mdi:alert-circle-outline"
+  - platform: template
+    name: "Protocol"
+    id: protocol_variant
+    icon: "mdi:bluetooth-settings"
+    entity_category: diagnostic
+  - platform: template
+    name: "Last Frame"
+    id: last_frame
+    icon: "mdi:code-brackets"
+    entity_category: diagnostic
 
 binary_sensor:
   - platform: template
     name: "Heater Status"
     id: stato_Bruciatore
+  - platform: template
+    name: "Heater Connected"
+    id: heater_connected
+    device_class: connectivity
+    entity_category: diagnostic
 
 # Sensors for status reporting
 sensor:
   - platform: uptime
     name: Uptime Sensor
 
+  - platform: wifi_signal
+    name: "WiFi Signal"
+    update_interval: 60s
+
+  - platform: ble_client
+    type: rssi
+    ble_client_id: heater_ble
+    name: "Heater BLE RSSI"
+    update_interval: 60s
+
   - platform: template
     name: "Error Code"
     id: Error_Code
-    accuracy_decimals: 0 
+    accuracy_decimals: 0
+    icon: "mdi:alert-circle-outline"
+
+  - platform: template
+    name: "Controller Error Code"
+    id: controller_error_code
+    accuracy_decimals: 0
+    icon: "mdi:alert-circle-outline"
+    entity_category: diagnostic
+
+  - platform: template
+    name: "Running Step"
+    id: running_step
+    accuracy_decimals: 0
+    icon: "mdi:state-machine"
+    entity_category: diagnostic
 
   - platform: template
     name: "Battery Voltage"
@@ -93,6 +268,7 @@ sensor:
     unit_of_measurement: "V"
     accuracy_decimals: 1
     device_class: voltage
+    state_class: measurement
     icon: "mdi:car-battery"
 
   - platform: template
@@ -120,6 +296,8 @@ sensor:
     id: room_temperature
     unit_of_measurement: "°C"
     accuracy_decimals: 0
+    device_class: temperature
+    state_class: measurement
     icon: "mdi:home-thermometer"
 
   - platform: template
@@ -127,6 +305,8 @@ sensor:
     id: heating_temperature
     unit_of_measurement: "°C"
     accuracy_decimals: 0
+    device_class: temperature
+    state_class: measurement
     icon: "mdi:radiator"
 
   - platform: ble_client
@@ -136,64 +316,123 @@ sensor:
     service_uuid: "0000ffe0-0000-1000-8000-00805f9b34fb"
     characteristic_uuid: "0000ffe1-0000-1000-8000-00805f9b34fb"
     name: "BLE Raw Data"
+    internal: true
     notify: true
     lambda: |-
-      
-      static const char* const states[] = {"Warmup", "Self test running", "Ignition", "Heating", "Shutting down"};
+      // Status frame layout (AirHeaterBLE app, protocols "AA 55" and "AA 66", see PROTOCOL.md):
+      //  0-1 header | 2 command | 3 running state | 4 error | 5 running step | 6-7 altitude
+      //  8 mode | 9 set level/temp | 10 actual level-1 | 11-12 voltage*10 | 13-14 heat exchanger temp
+      //  15-16 room temp | 17 display error code (AA 55) / error (AA 66) | 18 reserved | 19 checksum
+      static const char *const steps[] = {"Warmup", "Self test running", "Ignition", "Heating", "Shutting down"};
+      static const char *const errors_aa55[] = {
+          "No fault", "Startup failure", "Lack of fuel", "Supply voltage overrun", "Outlet sensor fault",
+          "Inlet sensor fault", "Pulse pump fault", "Fan fault", "Ignition unit fault", "Overheating",
+          "Overheat sensor fault"};
+      static const char *const errors_aa66[] = {
+          "No fault", "Supply voltage overrun", "Unknown", "Ignition unit fault", "Pulse pump fault",
+          "Overheating", "Fan fault", "Unknown", "Lack of fuel", "Overheat sensor fault", "Startup failure"};
 
-      if (x[0] == 170) {
-        ESP_LOGD("BLE", "Received data: %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X ",
-                  x[0], x[1], x[2], x[3], x[4], x[5], x[6], x[7], x[8], x[9], x[10], x[11], x[12], x[13], x[14], x[15], x[16], x[17], x[18], x[19]);
+      if (x.size() < 17 || x[0] != 0xAA || (x[1] != 0x55 && x[1] != 0x66)) {
+        ESP_LOGW("heater", "Unsupported frame (%u bytes): %s", (unsigned) x.size(), format_hex_pretty(x).c_str());
+        id(last_frame).publish_state(format_hex_pretty(x));
+        return NAN;
+      }
+      ESP_LOGD("heater", "Received: %s", format_hex_pretty(x).c_str());
+      id(last_frame_ms) = millis();
+      id(heater_connected).publish_state(true);
 
-        id(heating_temperature).publish_state((int16_t)(((uint8_t)x[14])<<8)|((uint8_t)x[13]));
-        id(Mode_Burner).publish_state(x[8] == 2 ? "Automatic" : "Level");
-        id(stato_Bruciatore).publish_state(x[3] > 0);
-        
-        // Set States
-        if (x[5] < sizeof(states)/sizeof(states[0])) {
-          id(stato_Candeletta).publish_state(states[x[5]]);
-        } else {
-          ESP_LOGD("Error", "Received state does not match known possible states: %02d", x[5]);
-        }
-        
-        id(stato_Potenza).publish_state(x[9]);
-        
-        id(Error_Code).publish_state(x[17]);
-        id(altitude).publish_state(((x[7])<<8)|x[6]);
-        id(room_temperature).publish_state((int16_t)(((uint8_t)x[16])<<8)|((uint8_t)x[15]));
-        id(battery_voltage).publish_state((((x[12])<<8)|x[11])/10.0);
+      const bool aa66 = x[1] == 0x66;
+      const uint8_t running_state = x[3];
+      const uint8_t step = x[5];
+      const uint8_t mode = x[8];
+      const uint8_t controller_error = x[4];
+      const uint8_t display_error = x.size() > 17 ? x[17] : 0;
+      // The app reads the error from byte 4 for AA 55 and from byte 17 for AA 66
+      const uint8_t error = aa66 ? display_error : controller_error;
 
-        if (id(stato_Candeletta).state == "Warmup" && id(stato_Bruciatore).state == 0) {
-          id(fan_speed).publish_state(0);
-        } else {
-          id(fan_speed).publish_state(x[10]+1);
+      int set_level = -1;
+      int set_temp = -1;
+      int actual_level = -1;
+      if (mode == 1) {
+        set_level = x[9];
+        actual_level = x[9];
+      } else if (mode == 2) {
+        set_temp = x[9];
+        actual_level = x[10] + 1;
+      } else if (mode == 0) {
+        actual_level = x[10] + 1;
+      }
+
+      id(protocol_variant).publish_state(aa66 ? "AA 66" : "AA 55");
+      id(stato_Bruciatore).publish_state(running_state > 0);
+      id(Mode_Burner).publish_state(mode == 2 ? "Automatic" : "Level");
+      id(running_step).publish_state(step);
+      if (running_state == 0 && step == 0) {
+        id(stato_Candeletta).publish_state("Standby");
+      } else if (step < sizeof(steps) / sizeof(steps[0])) {
+        id(stato_Candeletta).publish_state(steps[step]);
+      } else {
+        ESP_LOGD("heater", "Unknown running step: %d", step);
+      }
+
+      id(Error_Code).publish_state(aa66 ? error : display_error);
+      id(controller_error_code).publish_state(controller_error);
+      const char *const *errors = aa66 ? errors_aa66 : errors_aa55;
+      id(error_text).publish_state(error <= 10 ? errors[error] : "Unknown error");
+
+      id(altitude).publish_state(x[6] | (x[7] << 8));
+      id(battery_voltage).publish_state((x[11] | (x[12] << 8)) / 10.0f);
+      id(heating_temperature).publish_state((int16_t) (x[13] | (x[14] << 8)));
+      id(room_temperature).publish_state((int16_t) (x[15] | (x[16] << 8)));
+      id(stato_Potenza).publish_state(x[9]);
+      if (running_state == 0 && step == 0) {
+        id(fan_speed).publish_state(0);
+      } else if (actual_level >= 0) {
+        id(fan_speed).publish_state(actual_level);
+      }
+
+      // Keep the controls in sync with the heater (also when changed on the panel or the app)
+      if (mode == 1 || mode == 2) {
+        id(current_mode) = mode;
+        const size_t option = mode == 1 ? 0 : 1;  // index in the "Heater Mode" options
+        auto active = id(heater_mode).active_index();
+        if (!active.has_value() || *active != option) {
+          id(heater_mode).publish_state(std::string(option == 0 ? "Level" : "Automatic"));
         }
       }
-      return 0;
-        
+      if (set_level >= 1 && set_level <= 10) {
+        id(current_set_level) = set_level;
+        if (!id(heater_level).has_state() || id(heater_level).state != set_level) {
+          id(heater_level).publish_state(set_level);
+        }
+      }
+      if (set_temp >= 8 && set_temp <= 36) {
+        id(current_set_temp) = set_temp;
+        if (!id(heater_temperature).has_state() || id(heater_temperature).state != set_temp) {
+          id(heater_temperature).publish_state(set_temp);
+        }
+      }
+      if (id(heater_power).state != (running_state > 0)) {
+        id(heater_power).publish_state(running_state > 0);
+      }
+      return x.size();
+
 # Switches
 switch:
   - platform: template
     name: "Heater Power"
     id: heater_power
     icon: "mdi:radiator"
-    optimistic: true
     turn_on_action:
-      - ble_client.ble_write:
-          service_uuid: '0000FFE0-0000-1000-8000-00805F9B34FB'
-          characteristic_uuid: '0000FFE1-0000-1000-8000-00805F9B34FB'
-          value: [0xAA, 0x55, 0x0C, 0x22, 0x03, 0x01, 0x00, 0x32] #ON
-
+      - script.execute:
+          id: send_command
+          cmd: 3
+          value: 1
     turn_off_action:
-      - ble_client.ble_write:
-          service_uuid: '0000FFE0-0000-1000-8000-00805F9B34FB'
-          characteristic_uuid: '0000FFE1-0000-1000-8000-00805F9B34FB'
-          value: [0xAA, 0x55, 0x0C, 0x22, 0x03, 0x00, 0x00, 0x31] #OFF                          
-      - lambda: |-
-          id(fan_speed).publish_state(0);
-    
-    lambda: |-
-      return id(stato_Bruciatore).state;
+      - script.execute:
+          id: send_command
+          cmd: 3
+          value: 0
 
 # Select for mode
 select:
@@ -203,25 +442,11 @@ select:
     options:
       - "Level"
       - "Automatic"
-    initial_option: "Level"
-    optimistic: true
-    on_value:
-      then:
-        - if:
-            condition:
-              lambda: 'return id(heater_mode).state == "Level";'
-            then:
-              - lambda: 'id(current_mode) = 1;'
-              - ble_client.ble_write:
-                  service_uuid: '0000FFE0-0000-1000-8000-00805F9B34FB'
-                  characteristic_uuid: '0000FFE1-0000-1000-8000-00805F9B34FB'
-                  value: [0xAA, 0x55, 0x0C, 0x22, 0x02, 0x01, 0x00, 0x31]
-            else:
-              - lambda: 'id(current_mode) = 2;'
-              - ble_client.ble_write:
-                  service_uuid: '0000FFE0-0000-1000-8000-00805F9B34FB'
-                  characteristic_uuid: '0000FFE1-0000-1000-8000-00805F9B34FB'
-                  value: [0xAA, 0x55, 0x0C, 0x22, 0x02, 0x02, 0x00, 0x32]
+    set_action:
+      - lambda: "id(current_mode) = 0;"  # force the mode command to be sent
+      - script.execute:
+          id: ensure_mode
+          target_mode: !lambda 'return x == "Automatic" ? 2 : 1;'
 
 number:
   - platform: template
@@ -232,47 +457,66 @@ number:
     step: 1
     unit_of_measurement: "°C"
     icon: "mdi:thermometer"
-    optimistic: true
     set_action:
-      then:
-        # Set Automatic mode
-        - ble_client.ble_write:
-             service_uuid: '0000FFE0-0000-1000-8000-00805F9B34FB'
-             characteristic_uuid: '0000FFE1-0000-1000-8000-00805F9B34FB'
-             value: [0xAA, 0x55, 0x0C, 0x22, 0x02, 0x02, 0x00, 0x32]
-        - delay: 1s
-        # Send Temp       
-        - ble_client.ble_write:
-            service_uuid: '0000FFE0-0000-1000-8000-00805F9B34FB'
-            characteristic_uuid: '0000FFE1-0000-1000-8000-00805F9B34FB'
-            value: !lambda |-
-              uint8_t temp = (uint8_t)id(heater_temperature).state;  // Set Temp
-              uint8_t checksum = (0xAA + 0x55 + 0x0C + 0x22 + 0x04 + temp + 0x00) +1 % 256 ; // Calc checksum
-              return {0xAA, 0x55, 0x0C, 0x22, 0x04, temp, 0x00, checksum};
+      - script.execute:
+          id: set_temperature
+          temperature: !lambda "return (int) x;"
 
   - platform: template
     name: "Heater LEVEL"
     id: heater_level
-    min_value: 0
+    min_value: 1
     max_value: 10
     step: 1
-    unit_of_measurement: "Level"
     icon: "mdi:format-list-numbered"
-    optimistic: true
     set_action:
-      then:
-        # Set Level mode
-        - ble_client.ble_write:
-            service_uuid: '0000FFE0-0000-1000-8000-00805F9B34FB'
-            characteristic_uuid: '0000FFE1-0000-1000-8000-00805F9B34FB'
-            value: [0xAA, 0x55, 0x0C, 0x22, 0x02, 0x01, 0x00, 0x31]
-        - delay: 1s
-        # Send Level
-        - ble_client.ble_write:
-            service_uuid: '0000FFE0-0000-1000-8000-00805F9B34FB'
-            characteristic_uuid: '0000FFE1-0000-1000-8000-00805F9B34FB'
-            value: !lambda |-
-              uint8_t level = (uint8_t)id(heater_level).state;  // Set Level
-              uint8_t checksum = (0xAA + 0x55 + 0x0C + 0x22 + 0x04 + level + 0x00) +1 % 256 ; // Calc checksum
-              return {0xAA, 0x55, 0x0C, 0x22, 0x04, level, 0x00, checksum};
+      - script.execute:
+          id: set_level
+          level: !lambda "return (int) x;"
 
+button:
+  - platform: template
+    name: "Level Up"
+    icon: "mdi:chevron-up"
+    on_press:
+      - script.execute:
+          id: set_level
+          level: !lambda "return std::min(10, id(current_set_level) + 1);"
+
+  - platform: template
+    name: "Level Down"
+    icon: "mdi:chevron-down"
+    on_press:
+      - script.execute:
+          id: set_level
+          level: !lambda "return std::max(1, id(current_set_level) - 1);"
+
+  - platform: template
+    name: "Temperature Up"
+    icon: "mdi:thermometer-plus"
+    on_press:
+      - script.execute:
+          id: set_temperature
+          temperature: !lambda "return std::min(36, id(current_set_temp) + 1);"
+
+  - platform: template
+    name: "Temperature Down"
+    icon: "mdi:thermometer-minus"
+    on_press:
+      - script.execute:
+          id: set_temperature
+          temperature: !lambda "return std::max(8, id(current_set_temp) - 1);"
+
+  - platform: template
+    name: "Refresh Status"
+    icon: "mdi:refresh"
+    entity_category: diagnostic
+    on_press:
+      - script.execute:
+          id: send_command
+          cmd: 1
+          value: 0
+
+  - platform: restart
+    name: "Restart ESP"
+    entity_category: diagnostic

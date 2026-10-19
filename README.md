@@ -22,17 +22,27 @@ The VEVOR diesel air heater is designed for use in cars, campers, trucks, and RV
 ## Usage
 
 1. Ensure your Bluetooth device is enabled.
-2. Run the Python script.
-3. Follow the instructions to input manual commands or let the script automatically send the `cmd1` command at regular intervals.
+2. Run the Python script: `python Vevor_AirHeater_BLE.py <MAC> [--passkey 1234]`
+3. The script requests the heater status every second; type commands to control the heater.
 
 ## Supported Commands
 
 Available Commands:
 - `P0`: Turn heater OFF.
 - `P1`: Turn heater ON.
+- `M1` / `M2`: Mode LEVEL / AUTOMATIC (temperature).
 - `T8-T36`: Set temperature (8-36°C).
 - `L1-L10`: Set power level (1-10).
+- `+` / `-`: Level or temperature up / down (depending on the current mode).
+- `S`: Refresh status.
+- `C<cmd>,<value>`: Send a raw command, e.g. `C3,1` (see [PROTOCOL.md](PROTOCOL.md)).
 - `exit`: Exit program.
+
+## Protocol
+
+The full protocol, taken from the AirHeaterBLE app and compared with other projects, is described in
+[PROTOCOL.md](PROTOCOL.md). This project supports heaters that answer with the `AA 55` header (20 byte frame);
+`AA 66` heaters use the same frame and are supported as well.
   
 ## Product Information
 
@@ -45,6 +55,29 @@ For a more comprehensive understanding of the utilized protocol, refer to the de
 
 ## Using ESP32 Board with Home Assistant
 This is (ESP32-VevorBLE.yaml) the file to insert into an [esp32](https://upload.wikimedia.org/wikipedia/commons/3/33/Espressif_ESP-WROOM-32_Wi-Fi_%26_Bluetooth_Module.jpg) bluethoot card. to be able to use it with home assistant and on wifi
+
+Set the `heater_mac` (and `heater_passkey` if you changed the password in the app) substitutions and add
+these entries to your `secrets.yaml`:
+
+```yaml
+wifi_ssid: "..."
+wifi_password: "..."
+api_encryption_key: "..."   # 32 byte base64 key, see https://esphome.io/components/api
+ota_password: "..."
+```
+
+Entities:
+
+| Type          | Entities |
+|---------------|----------|
+| Controls      | Heater Power, Heater Mode (Level / Automatic), Heater LEVEL (1-10), Heater Temperature (8-36°C) |
+| Buttons       | Level Up / Down, Temperature Up / Down, Refresh Status, Restart ESP |
+| Sensors       | Room Temperature, Heating Temperature, Battery Voltage, Altitude, Power Status (set level / temperature), Fan Speed (current level), Error Code, Error (text), Glow Plug Status (running step), Heater Status, Heater Mode |
+| Diagnostics   | Heater Connected, Heater BLE RSSI, WiFi Signal, Controller Error Code, Running Step, Protocol, Last Frame, Uptime |
+
+The controls follow the heater state, also when it is changed on the heater panel or in the app.
+The `send_command` Home Assistant action sends any command from [PROTOCOL.md](PROTOCOL.md), e.g.
+`esphome.<device_name>_send_command` with `cmd: 3`, `value: 1`.
 
 ## Thanks
 
